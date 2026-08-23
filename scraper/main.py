@@ -4,7 +4,9 @@ import os
 import json
 from datetime import datetime
 import time
-from urllib.parse import urljoin  
+from urllib.parse import urljoin
+
+from requests.help import main  
 
 
 # Configuration
@@ -75,53 +77,160 @@ def get_next_page_url(soup, base_url):
         return urljoin(base_url, relative_url)
     return None
 
-def main():
-    print("Polite Scraper - Stage 2: Find All Pages")
+
+# FUNCTION: extract_book_data
+# What it does: Extract all book data from a single book page.
+
+
+def get_text_safely(tag):
+    """
+    Safely extract text from a BeautifulSoup tag.
+    Returns None if the tag doesn't exist.
+    """
+    if tag:
+        return tag.string.strip() if tag.string else None
+    return None
+
+def extract_book_data(book_url, source_page):
+    """
+    Extract raw data from a book detail page.
     
-    # Start with page 1
+    Parameters:
+    - book_url: The URL of the book page
+    - source_page: Where we found this book (catalogue page)
+    
+    Returns:
+    - A dictionary with the extracted data
+    """
+    
+    # Step 1: Fetch the book page (uses cache if available)
+    html, from_cache = fetch_page(book_url)
+    
+    if not html:
+        print(f"  ERROR: Could not fetch {book_url}")
+        return None
+    
+    # Step 2: Parse the HTML
+    soup = get_soup(html)
+    
+    # Step 3: Extract the title
+    title_tag = soup.select_one("h1")
+    title = get_text_safely(title_tag)
+    
+    # Step 4: Extract the price
+    price_tag = soup.select_one("p.price_color")
+    price_text = get_text_safely(price_tag)
+    
+    # Step 5: Extract availability — try multiple selectors
+    avail_tag = soup.select_one("p.instock.availability")
+    if not avail_tag:
+        # Try alternative selector
+        avail_tag = soup.select_one(".instock.availability")
+    availability_text = get_text_safely(avail_tag)
+    
+    # Step 6: Extract rating
+    rating_tag = soup.select_one("p.star-rating")
+    rating_text = None
+    if rating_tag:
+        classes = rating_tag.get("class", [])
+        for cls in classes:
+            if cls != "star-rating":
+                rating_text = cls
+                break
+    
+    # Step 7: Extract description
+    desc_tag = soup.select_one("#product_description ~ p")
+    if not desc_tag:
+        # Try alternative selector
+        desc_tag = soup.select_one("div#product_description ~ p")
+    description = get_text_safely(desc_tag)
+    
+    # Step 8: Build the raw record
+    raw_record = {
+        "title": title,
+        "product_url": book_url,
+        "price_text": price_text,
+        "availability_text": availability_text,
+        "rating_text": rating_text,
+        "description": description,
+        "source_page": source_page,
+        "fetched_at": datetime.now().isoformat()
+    }
+    
+    return raw_record
+def main():
+    print("Polite Scraper - Stage 3: Extract Raw Book Data")
+    
+    # Step 1: Get all book URLs from Stage 2
     base_url = "https://books.toscrape.com/catalogue/"
-    current_url = "https://books.toscrape.com/catalogue/page-1.html"
+    start_url = "https://books.toscrape.com/catalogue/page-1.html"
     
     all_book_links = []
     page_number = 1
+    current_url = start_url
     
+    # Collect all book URLs
     while page_number <= 3 and current_url:
-        print(f"\nProcessing page {page_number}: {current_url}")
-        
-        # Fetch the page (uses cache if available)
+        print(f"\nCollecting links from page {page_number}...")
         html, from_cache = fetch_page(current_url)
-        
         if not html:
             print(f"  Failed to load page {page_number}")
             break
         
-        # Parse the HTML
         soup = get_soup(html)
-        
-        # Get book links from this page
         book_links = get_book_links(soup, base_url)
         print(f"  Found {len(book_links)} books on this page")
         all_book_links.extend(book_links)
         
-        # Try to go to next page
         next_url = get_next_page_url(soup, current_url)
         if next_url:
-            print(f"  Next page: {next_url}")
             current_url = next_url
             page_number += 1
         else:
-            print("  No next page found")
             break
     
-    # Remove duplicates (just in case)
     unique_links = list(set(all_book_links))
+    print(f"\nTotal unique books to process: {len(unique_links)}")
     
+    # Step 2: Process each book
+    raw_records = []
+    processed = 0
+    
+    for book_url in unique_links:
+        processed += 1
+        print(f"\nProcessing book {processed}/{len(unique_links)}: {book_url}")
+        
+        # IMPORTANT: Store the source page for this book
+        # Since we don't track which page each book came from, we use the base URL
+        record = extract_book_data(book_url, "https://books.toscrape.com/catalogue/")
+        
+        if record:
+            raw_records.append(record)
+            print(f"  Title: {record['title'][:50] if record['title'] else 'None'}")
+            print(f"  Price: {record['price_text']}")
+            print(f"  Rating: {record['rating_text']}")
+        else:
+            print(f"  SKIPPED: Could not extract data")
+        
+        # Be polite — wait between requests
+        time.sleep(DELAY)
+    
+    # Step 3: Save raw records to a file
+    output_path = os.path.join(OUTPUT_DIR, "raw_records.json")
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(raw_records, f, indent=2, ensure_ascii=False)
+    
+    # Step 4: Print summary
     print(f"\n{'='*50}")
     print(f"Summary:")
-    print(f"  Pages processed: {page_number}")
-    print(f"  Total books found: {len(all_book_links)}")
-    print(f"  Unique books: {len(unique_links)}")
+    print(f"  Books processed: {processed}")
+    print(f"  Records extracted: {len(raw_records)}")
+    print(f"  Records with title: {sum(1 for r in raw_records if r['title'])}")
+    print(f"  Records with price: {sum(1 for r in raw_records if r['price_text'])}")
+    print(f"  Raw data saved to: {output_path}")
     print(f"{'='*50}")
-
+    
+    
+    
 if __name__ == "__main__":
     main()
