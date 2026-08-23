@@ -158,76 +158,243 @@ def extract_book_data(book_url, source_page):
     }
     
     return raw_record
+
+# ============================================================
+# STAGE 4: Clean, Validate, Store
+# ============================================================
+
+# Import Pydantic for validation
+from pydantic import BaseModel, ValidationError, Field
+from typing import Optional
+
+# ============================================================
+# Define the clean data schema using Pydantic
+# ============================================================
+
+class BookRecord(BaseModel):
+    """
+    The shape of a clean, validated book record.
+    Pydantic will automatically check every record against this schema.
+    """
+    title: str
+    # title is required and must be a string
+    
+    product_url: str
+    # product_url is required and must be a string
+    
+    price_gbp: float
+    # price_gbp is required and must be a number (float)
+    # This is the cleaned version of the price
+    
+    availability_text: Optional[str] = None
+    # availability_text is optional (can be None)
+    
+    rating: int = Field(ge=1, le=5)
+    # rating is required, must be between 1 and 5
+    # ge=1 means "greater than or equal to 1"
+    # le=5 means "less than or equal to 5"
+    
+    description: Optional[str] = None
+    # description is optional (can be None)
+    
+    source_page: str
+    # source_page is required
+    
+    fetched_at: str
+    # fetched_at is required
+
+# ============================================================
+# FUNCTION: clean_price
+# What it does: Turn "£51.77" into 51.77
+# ============================================================
+
+def clean_price(price_text):
+    """
+    Clean a price string into a number.
+    
+    Example: "Â£51.77" → 51.77
+             "£51.77"   → 51.77
+             "51.77"    → 51.77
+    """
+    if not price_text:
+        return None
+    
+    # Remove the £ symbol and Â character
+    cleaned = price_text.replace("Â", "").replace("£", "").strip()
+    
+    # Remove any extra spaces
+    cleaned = cleaned.strip()
+    
+    try:
+        # Convert to float (number with decimal)
+        return float(cleaned)
+    except ValueError:
+        # If it can't be converted, return None
+        return None
+
+# ============================================================
+# FUNCTION: clean_rating
+# What it does: Turn "Three" into 3
+# ============================================================
+
+def clean_rating(rating_text):
+    """
+    Turn text rating into a number.
+    
+    Example: "One"   → 1
+             "Two"   → 2
+             "Three" → 3
+             "Four"  → 4
+             "Five"  → 5
+    """
+    if not rating_text:
+        return None
+    
+    rating_map = {
+        "One": 1,
+        "Two": 2,
+        "Three": 3,
+        "Four": 4,
+        "Five": 5
+    }
+    
+    return rating_map.get(rating_text, None)
+    # .get() returns None if the key doesn't exist
+
+# ============================================================
+# FUNCTION: clean_availability
+# What it does: Extract just the availability status
+# ============================================================
+
+def clean_availability(availability_text):
+    """
+    Clean availability text.
+    
+    Example: "In stock (22 available)" → "In stock"
+             "In stock"                 → "In stock"
+    """
+    if not availability_text:
+        return None
+    
+    # If there's a parenthesis, take everything before it
+    if "(" in availability_text:
+        return availability_text.split("(")[0].strip()
+    
+    return availability_text.strip()
+
+# ============================================================
+# FUNCTION: clean_and_validate_record
+# What it does: Take a raw record, clean it, validate it
+# ============================================================
+
+def clean_and_validate_record(raw_record):
+    """
+    Clean a raw record and validate it against the schema.
+    
+    Returns:
+    - (clean_record, errors) where:
+      - clean_record is a validated BookRecord or None
+      - errors is a list of error messages or None
+    """
+    if not raw_record:
+        return None, ["Empty record"]
+    
+    # Step 1: Clean the fields
+    price_gbp = clean_price(raw_record.get("price_text"))
+    rating = clean_rating(raw_record.get("rating_text"))
+    availability = clean_availability(raw_record.get("availability_text"))
+    
+    # Step 2: Build a clean record dictionary
+    clean_data = {
+        "title": raw_record.get("title"),
+        "product_url": raw_record.get("product_url"),
+        "price_gbp": price_gbp,
+        "availability_text": availability,
+        "rating": rating,
+        "description": raw_record.get("description"),
+        "source_page": raw_record.get("source_page"),
+        "fetched_at": raw_record.get("fetched_at")
+    }
+    
+    # Step 3: Validate against the schema
+    try:
+        validated = BookRecord(**clean_data)
+        return validated, None
+    except ValidationError as e:
+        # Pydantic caught errors — return the error messages
+        errors = [f"{err['loc'][0]}: {err['msg']}" for err in e.errors()]
+        return None, errors
+
+# ============================================================
+# FUNCTION: save_clean_records
+# What it does: Save clean records to books.json
+# ============================================================
+
+def save_clean_records(valid_records, errors):
+    """
+    Save valid records to books.json and errors to errors.json
+    """
+    # Save valid records
+    books_path = os.path.join(OUTPUT_DIR, "books.json")
+    with open(books_path, "w", encoding="utf-8") as f:
+        # Convert each record to a dictionary for JSON
+        records_dict = [record.dict() for record in valid_records]
+        json.dump(records_dict, f, indent=2, ensure_ascii=False)
+    
+    # Save errors if any
+    if errors:
+        errors_path = os.path.join(OUTPUT_DIR, "errors.json")
+        with open(errors_path, "w", encoding="utf-8") as f:
+            json.dump(errors, f, indent=2, ensure_ascii=False)
+            
+            
 def main():
-    print("Polite Scraper - Stage 3: Extract Raw Book Data")
+    print("Polite Scraper - Stage 4: Clean, Validate, Store")
     
-    # Step 1: Get all book URLs from Stage 2
-    base_url = "https://books.toscrape.com/catalogue/"
-    start_url = "https://books.toscrape.com/catalogue/page-1.html"
+    # Step 1: Load raw records from Stage 3
+    raw_path = os.path.join(OUTPUT_DIR, "raw_records.json")
     
-    all_book_links = []
-    page_number = 1
-    current_url = start_url
+    if not os.path.exists(raw_path):
+        print("ERROR: raw_records.json not found. Run Stage 3 first.")
+        return
     
-    # Collect all book URLs
-    while page_number <= 3 and current_url:
-        print(f"\nCollecting links from page {page_number}...")
-        html, from_cache = fetch_page(current_url)
-        if not html:
-            print(f"  Failed to load page {page_number}")
-            break
+    with open(raw_path, "r", encoding="utf-8") as f:
+        raw_records = json.load(f)
+    
+    print(f"Loaded {len(raw_records)} raw records from {raw_path}")
+    
+    # Step 2: Clean and validate each record
+    valid_records = []
+    error_records = []
+    
+    for i, raw_record in enumerate(raw_records, 1):
+        print(f"\nProcessing record {i}/{len(raw_records)}: {raw_record.get('title', 'No title')[:40]}...")
         
-        soup = get_soup(html)
-        book_links = get_book_links(soup, base_url)
-        print(f"  Found {len(book_links)} books on this page")
-        all_book_links.extend(book_links)
+        clean_record, errors = clean_and_validate_record(raw_record)
         
-        next_url = get_next_page_url(soup, current_url)
-        if next_url:
-            current_url = next_url
-            page_number += 1
+        if clean_record:
+            valid_records.append(clean_record)
+            print(f"  ✅ Valid: {clean_record.title[:40] if clean_record.title else 'No title'}...")
+            print(f"     Price: £{clean_record.price_gbp}, Rating: {clean_record.rating}")
         else:
-            break
+            error_records.append({
+                "raw_record": raw_record,
+                "errors": errors
+            })
+            print(f"   Invalid: {errors}")
     
-    unique_links = list(set(all_book_links))
-    print(f"\nTotal unique books to process: {len(unique_links)}")
-    
-    # Step 2: Process each book
-    raw_records = []
-    processed = 0
-    
-    for book_url in unique_links:
-        processed += 1
-        print(f"\nProcessing book {processed}/{len(unique_links)}: {book_url}")
-        
-        # IMPORTANT: Store the source page for this book
-        # Since we don't track which page each book came from, we use the base URL
-        record = extract_book_data(book_url, "https://books.toscrape.com/catalogue/")
-        
-        if record:
-            raw_records.append(record)
-            print(f"  Title: {record['title'][:50] if record['title'] else 'None'}")
-            print(f"  Price: {record['price_text']}")
-            print(f"  Rating: {record['rating_text']}")
-        else:
-            print(f"  SKIPPED: Could not extract data")
-        
-        # Be polite — wait between requests
-        time.sleep(DELAY)
-    
-    # Step 3: Save raw records to a file
-    output_path = os.path.join(OUTPUT_DIR, "raw_records.json")
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(raw_records, f, indent=2, ensure_ascii=False)
+    # Step 3: Save the results
+    save_clean_records(valid_records, error_records)
     
     # Step 4: Print summary
     print(f"\n{'='*50}")
     print(f"Summary:")
-    print(f"  Books processed: {processed}")
-    print(f"  Records extracted: {len(raw_records)}")
-    print(f"  Records with title: {sum(1 for r in raw_records if r['title'])}")
-    print(f"  Records with price: {sum(1 for r in raw_records if r['price_text'])}")
-    print(f"  Raw data saved to: {output_path}")
+    print(f"  Raw records loaded: {len(raw_records)}")
+    print(f"  Valid records: {len(valid_records)}")
+    print(f"  Invalid records: {len(error_records)}")
+    print(f"  Clean data saved to: {os.path.join(OUTPUT_DIR, 'books.json')}")
+    if error_records:
+        print(f"  Errors saved to: {os.path.join(OUTPUT_DIR, 'errors.json')}")
     print(f"{'='*50}")
     
     
